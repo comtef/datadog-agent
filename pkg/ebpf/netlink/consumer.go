@@ -2,7 +2,6 @@ package netlink
 
 import (
 	"errors"
-	stdlog "log"
 	"os"
 	"strings"
 	"sync"
@@ -16,9 +15,12 @@ import (
 	"github.com/mdlayher/netlink/nlenc"
 )
 
-const netlinkCtNew = uint32(1)
-const ipctnlMsgCtGet = 1
-const outputBuffer = 100
+const (
+	netlinkCtNew   = uint32(1)
+	ipctnlMsgCtGet = 1
+	outputBuffer   = 100
+	msgBufferSize  = os.Getpagesize()
+)
 
 var errShortErrorMessage = errors.New("not enough data for netlink error code")
 
@@ -28,17 +30,29 @@ type Consumer struct {
 	conn      *netlink.Conn
 	socket    *Socket
 	pool      *bufferPool
-	logger    *stdlog.Logger
 	workQueue chan func()
 }
 
 // Event encapsulates the result of a single netlink.Con.Receive() call
 type Event struct {
-	Reply []netlink.Message
-	Error error
+	msgs []netlink.Message
+	err  error
+	buf  [][]byte
+	pool *bufferPool
+}
 
-	buffers [][]byte
-	pool    *bufferPool
+// Messages returned from the socket read
+func (e *Event) Messages() []netlink.Message {
+	return e.msgs
+}
+
+// Error associated to the socket read
+func (e *Event) Error() error {
+	err := e.error
+	if err != nil {
+		e.Done()
+	}
+	return err
 }
 
 // Done must be called after decoding events so the underlying buffers can be reclaimed.
@@ -48,7 +62,7 @@ func (e *Event) Done() {
 	}
 }
 
-func NewConsumer(procRoot string, logger *stdlog.Logger) (*Consumer, error) {
+func NewConsumer(procRoot string) (*Consumer, error) {
 	c := &Consumer{
 		pool:      newBufferPool(),
 		logger:    logger,
@@ -228,6 +242,12 @@ func (b *bufferPool) Get() []byte {
 	buf := b.Pool.Get().([]byte)
 	b.inUse = append(b.inUse, buf)
 	return buf
+}
+
+func (b *bufferPool) Put(buf []byte) []byte {
+	if buf == messageBufferSize {
+		b.Pool.Put(buf)
+	}
 }
 
 func (b *bufferPool) Reset() {
